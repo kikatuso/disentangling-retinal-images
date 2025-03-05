@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
 import pytorch_lightning as pl
 import torch
 import torchmetrics
@@ -10,7 +11,7 @@ import torchvision
 from pytorch_lightning.utilities import rank_zero_only
 
 from src.generative_model.augment import AugmentPipe
-from src.generative_model.classifier import Classifier, LinearClassifier
+from src.generative_model.classifier import Classifier, LinearClassifier, AdvClassifier
 from src.generative_model.discriminator import Discriminator
 from src.generative_model.generator import Generator
 from src.generative_model.loss import (PathLengthPenalty,
@@ -58,6 +59,10 @@ class StyleGAN2Model(pl.LightningModule):
         self.cond_dim = sum(self.cond_dims)
         self.class_dims = class_dims
         self.class_dim = sum(self.class_dims)
+
+        self.adv_cl = config.adv_cl
+        self.gamma = config.gamma
+        self.alpha_scale = config.alpha_scale
 
         self.cond_distribution = cond_distribution
 
@@ -124,6 +129,26 @@ class StyleGAN2Model(pl.LightningModule):
                         w_shape=self.subspace_dims[i],
                         c_shape=self.class_dims[i],
                     )
+
+            if self.adv_cl: 
+                Adv_Cs = {}
+                for i in range(number_subspaces):
+                    rest_subspaces = list(range(number_subspaces))
+                    rest_subspaces.pop(i)
+                    for j in rest_subspaces:
+                        Adv_Cs[f"{i},{j}"] = AdvClassifier(
+                            z_shape=self.subspace_dims[i],
+                            c_shape=self.class_dims[j],
+                        )
+                # Free, last subspace.
+                free_subspace_dim = self.config.latent_dim - sum(self.subspace_dims)
+                for i, subspace in enumerate(list(range(number_subspaces))):
+                    Adv_Cs[f"{number_subspaces+1},{subspace}"] = AdvClassifier(
+                            z_shape=free_subspace_dim,
+                            c_shape=self.class_dims[i],
+                        )
+                self.Adv_Cs = torch.nn.ModuleDict(Adv_Cs)
+
 
         for state in ["trn", "val", "test"]:
             # for state "train" I get the error KeyError:
@@ -213,6 +238,14 @@ class StyleGAN2Model(pl.LightningModule):
                 )
                 discriminator_parameters += list(
                     self.Cs[str(i)].parameters()
+                )
+        if self.adv_cl:
+            for adv_cl in self.Adv_Cs.values():
+                generator_parameters += list(
+                    adv_cl.parameters()
+                )
+                discriminator_parameters += list(
+                    adv_cl.parameters()
                 )
 
         g_opt = torch.optim.Adam(
@@ -560,6 +593,7 @@ class StyleGAN2Model(pl.LightningModule):
     ):
         """Optimize subspace classifiers and minimize dependence measure between subspaces."""
         subspace_cs_loss = 0
+        if self.adv_cl: adv_cs_loss = 0 
         batch_image, batch_labels = batch["image"], batch["labels"]
         # Get the encoder mappings.
         if w_real_hat is None:
@@ -594,7 +628,42 @@ class StyleGAN2Model(pl.LightningModule):
             if log:
                 self.metric_classifiers[state][str(i)].update(y_hat, subspace_labels)
             subspace_cs_loss = subspace_cs_loss + c_loss
+
+            if self.adv_cl:
+                # Training progress for lambda schedule.
+                total_steps = self.trainer.estimated_stepping_batches
+                start_steps = self.current_epoch * self.trainer.num_training_batches
+                p = float(batch_idx + start_steps) / total_steps
+                alpha = (2.0 / (1.0 + np.exp(-self.gamma * p)) - 1) * self.alpha_scale
+
+                # First subspaces with labels.
+                rest_subspaces = list(range(len(self.class_dims)))
+                rest_subspaces.pop(i)
+                for j in rest_subspaces:
+                    subspace_labels_adv = batch_labels[
+                        :, start + j : start + (j + 1)
+                    ].squeeze(1)
+                    y_hat_adv = self.Adv_Cs[f"{i},{j}"](subspace, alpha)
+                    c_loss_adv = torch.nn.functional.cross_entropy(
+                        input=y_hat_adv,
+                        target=subspace_labels_adv,
+                    )
+                    adv_cs_loss = adv_cs_loss + c_loss_adv
+                
+                # Last subspace without labels (style space).
+                last_subspace = w_real_hat[ :, sum(self.subspace_dims) : ]
+                y_hat_adv = self.Adv_Cs[f"{len(self.class_dims)+1},{i}"](
+                    last_subspace, alpha
+                )
+                c_loss_adv = torch.nn.functional.cross_entropy(
+                    input=y_hat_adv,
+                    target=subspace_labels,
+                )
+                adv_cs_loss = adv_cs_loss + c_loss_adv
+
         subspace_cs_loss = subspace_cs_loss / len(self.class_dims)
+        if self.adv_cl:
+            adv_cs_loss = adv_cs_loss / len(self.Adv_Cs.keys())
 
         # Minimize dependence measure between subspaces.
         dCor_measures = []
@@ -630,6 +699,8 @@ class StyleGAN2Model(pl.LightningModule):
         else:
             dCor_loss = self.config.lambda_distance_correlation * dCor
         subspaces_loss = self.config.lambda_subspace_cs * subspace_cs_loss + dCor_loss
+        if self.adv_cl:
+            subspaces_loss = subspaces_loss + adv_cs_loss
 
         if log:
             self.metric_subspace_cs_loss[state].update(subspace_cs_loss.detach())
