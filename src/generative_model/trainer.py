@@ -26,7 +26,7 @@ def create_trainer(config: dict, experiment_folder: str):
     )
     checkpoint_callback = ModelCheckpoint(
         dirpath=ckpt_folder,
-        save_top_k=-1,
+        save_top_k=3,
         monitor=config.monitor_metric,
         mode=config.monitor_mode,
         filename="_{epoch}",
