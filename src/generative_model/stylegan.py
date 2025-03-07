@@ -11,7 +11,8 @@ import torchvision
 from pytorch_lightning.utilities import rank_zero_only
 
 from src.generative_model.augment import AugmentPipe
-from src.generative_model.classifier import Classifier, LinearClassifier, AdvClassifier
+from src.generative_model.classifier import (AdvClassifier, Classifier,
+                                             LinearClassifier)
 from src.generative_model.discriminator import Discriminator
 from src.generative_model.generator import Generator
 from src.generative_model.loss import (PathLengthPenalty,
@@ -95,29 +96,15 @@ class StyleGAN2Model(pl.LightningModule):
             latent_dim=config.latent_dim,
         )
 
-        # Initialize metrics for epoch-wise logging.
-        self.metric_D_real = SimpleMetric()
-        self.metric_D_fake = SimpleMetric()
-        self.metric_D = SimpleMetric()
-        self.metric_rGP = SimpleMetric()
-        self.metric_G = SimpleMetric()
-        self.metric_rPLP = SimpleMetric()
-        self.metric_aug_p = SimpleMetric()
-
-        metric_E_w_fake = {}
-        metric_E_feature_real = {}
-        metric_overall_loss = {}
-
         if self.class_dim > 0:
-            number_subspaces = len(class_dims)
+            num_subspaces = len(class_dims)
             self.subspace_dims = config.classifier.subspace_dims
+            Cs = {}
             metric_subspace_cs_loss = {}
             metric_subspace = {}
             metric_classifiers = {}
-            metric_dCor = {}
-            Cs = {}
 
-            for i in range(number_subspaces):
+            for i in range(num_subspaces):
                 if config.classifier.linear:
                     Cs[str(i)] = LinearClassifier(
                         w_shape=self.subspace_dims[i],
@@ -130,39 +117,55 @@ class StyleGAN2Model(pl.LightningModule):
                         c_shape=self.class_dims[i],
                     )
 
-            if self.adv_cl: 
-                Adv_Cs = {}
-                for i in range(number_subspaces):
-                    rest_subspaces = list(range(number_subspaces))
-                    rest_subspaces.pop(i)
-                    for j in rest_subspaces:
-                        Adv_Cs[f"{i},{j}"] = AdvClassifier(
-                            z_shape=self.subspace_dims[i],
-                            c_shape=self.class_dims[j],
-                        )
-                # Free, last subspace.
-                free_subspace_dim = self.config.latent_dim - sum(self.subspace_dims)
-                for i, subspace in enumerate(list(range(number_subspaces))):
-                    Adv_Cs[f"{number_subspaces+1},{subspace}"] = AdvClassifier(
-                            z_shape=free_subspace_dim,
-                            c_shape=self.class_dims[i],
-                        )
-                self.Adv_Cs = torch.nn.ModuleDict(Adv_Cs)
+        if self.adv_cl:
+            Adv_Cs = {}
+            metric_adv_classifiers = {}
+            for i in range(num_subspaces):
+                rest_subspaces = list(range(num_subspaces))
+                rest_subspaces.pop(i)
+                for j in rest_subspaces:
+                    Adv_Cs[f"{i},{j}"] = AdvClassifier(
+                        z_shape=self.subspace_dims[i],
+                        c_shape=self.class_dims[j],
+                    )
+            # Free, last subspace.
+            free_subspace_dim = self.config.latent_dim - sum(self.subspace_dims)
+            for i, subspace in enumerate(list(range(num_subspaces))):
+                Adv_Cs[f"{num_subspaces+1},{subspace}"] = AdvClassifier(
+                    z_shape=free_subspace_dim,
+                    c_shape=self.class_dims[i],
+                )
+            self.Adv_Cs = torch.nn.ModuleDict(Adv_Cs)
 
-
+        # Logging:
+        # Initialize metrics for epoch-wise logging.
+        self.metric_D_real = SimpleMetric()
+        self.metric_D_fake = SimpleMetric()
+        self.metric_D = SimpleMetric()
+        self.metric_rGP = SimpleMetric()
+        self.metric_G = SimpleMetric()
+        self.metric_rPLP = SimpleMetric()
+        self.metric_aug_p = SimpleMetric()
+        metric_dCor = {}
+        metric_E_w_fake = {}
+        metric_E_feature_real = {}
+        metric_overall_loss = {}
         for state in ["trn", "val", "test"]:
             # for state "train" I get the error KeyError:
             # "attribute 'train' or 'training' already exists (torch ModuleDict)
             metric_E_w_fake[state] = SimpleMetric()
             metric_E_feature_real[state] = SimpleMetric()
             metric_overall_loss[state] = SimpleMetric()
+            metric_dCor[state] = torch.nn.ModuleDict({})
+            for i in range(num_subspaces + 1):
+                for j in range(i):
+                    metric_dCor[state][f"{j}{i}"] = SimpleMetric()
             if self.class_dim > 0:
                 metric_subspace_cs_loss[state] = SimpleMetric()
                 metric_subspace[state] = SimpleMetric()
                 metric_classifiers[state] = torch.nn.ModuleDict({})
-                metric_dCor[state] = torch.nn.ModuleDict({})
 
-                for i in range(number_subspaces):
+                for i in range(num_subspaces):
                     num_classes = self.class_dims[i]
                     metrics = torchmetrics.MetricCollection(
                         [
@@ -178,40 +181,76 @@ class StyleGAN2Model(pl.LightningModule):
                         prefix=f"{state}_c_{i+1}_"
                     )
 
-                for i in range(number_subspaces + 1):
-                    for j in range(i):
-                        metric_dCor[state][f"{j}{i}"] = SimpleMetric()
+            if self.adv_cl:
+                metric_adv_classifiers[state] = torch.nn.ModuleDict({})
+                for i in range(num_subspaces):
+                    rest_subspaces = list(range(num_subspaces))
+                    rest_subspaces.pop(i)
+                    for j in rest_subspaces:
+                        metrics = torchmetrics.MetricCollection(
+                            [
+                                torchmetrics.classification.MulticlassAccuracy(
+                                    self.class_dims[j], average="micro"
+                                ),
+                                torchmetrics.classification.MulticlassJaccardIndex(
+                                    self.class_dims[j], average="macro"
+                                ),
+                            ]
+                        )
+                        metric_adv_classifiers[state][f"{i},{j}"] = metrics.clone(
+                            prefix=f"{state}_adv_c_w{i+1}_w{j+1}_"
+                        )
+                    # Free, last subspace.
+                    free_subspace_dim = self.config.latent_dim - sum(self.subspace_dims)
+                    metrics = torchmetrics.MetricCollection(
+                        [
+                            torchmetrics.classification.MulticlassAccuracy(
+                                self.class_dims[i], average="micro"
+                            ),
+                            torchmetrics.classification.MulticlassJaccardIndex(
+                                self.class_dims[i], average="macro"
+                            ),
+                        ]
+                    )
+                    metric_adv_classifiers[state][
+                        f"{num_subspaces},{i}"
+                    ] = metrics.clone(
+                        prefix=f"{state}_adv_c_w{num_subspaces+1}_w{i+1}_"
+                    )
 
         self.metric_E_w_fake = torch.nn.ModuleDict(metric_E_w_fake)
         self.metric_E_feature_real = torch.nn.ModuleDict(metric_E_feature_real)
         self.metric_overall_loss = torch.nn.ModuleDict(metric_overall_loss)
+        self.metric_dCor = torch.nn.ModuleDict(metric_dCor)
 
         if self.class_dim > 0:
             self.metric_subspace_cs_loss = torch.nn.ModuleDict(metric_subspace_cs_loss)
             self.metric_subspace = torch.nn.ModuleDict(metric_subspace)
             self.Cs = torch.nn.ModuleDict(Cs)
             self.metric_classifiers = torch.nn.ModuleDict(metric_classifiers)
-            self.metric_dCor = torch.nn.ModuleDict(metric_dCor)
 
-            # Ring buffer of latent samples for distance correlation computation.
-            if config.buffer_size is not None:
-                self.W_train = torch.randn(
-                    size=(
-                        config.buffer_size,
-                        config.data.batch_size,
-                        config.latent_dim,
-                    ),
-                )
-                self.W_val = torch.randn(
-                    size=(
-                        config.buffer_size,
-                        config.data.batch_size,
-                        config.latent_dim,
-                    ),
-                )
-                self.distance_correlation_weight = 1 + config.buffer_size
-            else:
-                self.distance_correlation_weight = 1
+        if self.adv_cl:
+            self.metric_adv_classifiers = torch.nn.ModuleDict(metric_adv_classifiers)
+
+        # Ring buffer of latent samples for distance correlation computation.
+        if config.buffer_size is not None:
+            self.W_train = torch.randn(
+                size=(
+                    config.buffer_size,
+                    config.data.batch_size,
+                    config.latent_dim,
+                ),
+            )
+            self.W_val = torch.randn(
+                size=(
+                    config.buffer_size,
+                    config.data.batch_size,
+                    config.latent_dim,
+                ),
+            )
+            self.distance_correlation_weight = 1 + config.buffer_size
+        else:
+            self.distance_correlation_weight = 1
 
         self.augment_pipe = AugmentPipe(
             config.ada_start_p,
@@ -233,20 +272,12 @@ class StyleGAN2Model(pl.LightningModule):
         discriminator_parameters = list(self.D.parameters())
         if self.class_dim > 0:
             for i in range(len(self.class_dims)):
-                generator_parameters += list(
-                    self.Cs[str(i)].parameters()
-                )
-                discriminator_parameters += list(
-                    self.Cs[str(i)].parameters()
-                )
+                generator_parameters += list(self.Cs[str(i)].parameters())
+                discriminator_parameters += list(self.Cs[str(i)].parameters())
         if self.adv_cl:
             for adv_cl in self.Adv_Cs.values():
-                generator_parameters += list(
-                    adv_cl.parameters()
-                )
-                discriminator_parameters += list(
-                    adv_cl.parameters()
-                )
+                generator_parameters += list(adv_cl.parameters())
+                discriminator_parameters += list(adv_cl.parameters())
 
         g_opt = torch.optim.Adam(
             generator_parameters, lr=self.config.lr_g, betas=(0.0, 0.99), eps=1e-8
@@ -394,16 +425,15 @@ class StyleGAN2Model(pl.LightningModule):
             W_train = None
 
         # 1.2 Subspace classifier losses and dCor minimization.
-        if self.class_dim > 0:
-            subspaces_loss = self._shared_subspaces_eval_step(
-                batch,
-                batch_idx,
-                state="trn",
-                w_real_hat=w_real_hat,
-                W=W_train,
-                log=True,
-            )
-            d_loss = d_loss + subspaces_loss
+        subspaces_loss = self._shared_subspaces_eval_step(
+            batch,
+            batch_idx,
+            state="trn",
+            w_real_hat=w_real_hat,
+            W=W_train,
+            log=True,
+        )
+        d_loss = d_loss + subspaces_loss
 
         # 1.3 R1 regularization.
         if (batch_idx + 1) % self.config.lazy_gradient_penalty_interval == 0:
@@ -476,15 +506,14 @@ class StyleGAN2Model(pl.LightningModule):
 
         # 2.2 Subspace classifier losses and dCor minimization.
         # Detach w_real_hat for encoder training.
-        if self.class_dim > 0:
-            subspaces_loss = self._shared_subspaces_eval_step(
-                batch,
-                batch_idx,
-                state="trn",
-                w_real_hat=w_real_hat.detach(),
-                log=False,
-            )
-            g_loss = g_loss + subspaces_loss
+        subspaces_loss = self._shared_subspaces_eval_step(
+            batch,
+            batch_idx,
+            state="trn",
+            w_real_hat=w_real_hat.detach(),
+            log=False,
+        )
+        g_loss = g_loss + subspaces_loss
 
         # 2.3 Apply path length regularization.
         if (
@@ -518,22 +547,20 @@ class StyleGAN2Model(pl.LightningModule):
         val_overall_loss = 0.0
         encoder_loss = self._shared_encoder_eval_step(batch, batch_idx, state="val")
         val_overall_loss = val_overall_loss + encoder_loss
-        if self.class_dim > 0:
-            subspace_loss = self._shared_subspaces_eval_step(
-                batch, batch_idx, state="val", log=True
-            )
-            val_overall_loss = val_overall_loss + subspace_loss
+        subspace_loss = self._shared_subspaces_eval_step(
+            batch, batch_idx, state="val", log=True
+        )
+        val_overall_loss = val_overall_loss + subspace_loss
         self.metric_overall_loss["val"].update(val_overall_loss)
 
     def test_step(self, batch, batch_idx):
         test_overall_loss = 0.0
         encoder_loss = self._shared_encoder_eval_step(batch, batch_idx, state="test")
         test_overall_loss = test_overall_loss + encoder_loss
-        if self.class_dim > 0:
-            subspace_loss = self._shared_subspaces_eval_step(
-                batch, batch_idx, state="test", log=True
-            )
-            test_overall_loss = test_overall_loss + subspace_loss
+        subspace_loss = self._shared_subspaces_eval_step(
+            batch, batch_idx, state="test", log=True
+        )
+        test_overall_loss = test_overall_loss + subspace_loss
         self.metric_overall_loss["test"].update(test_overall_loss)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
@@ -592,8 +619,6 @@ class StyleGAN2Model(pl.LightningModule):
         log: bool = False,
     ):
         """Optimize subspace classifiers and minimize dependence measure between subspaces."""
-        subspace_cs_loss = 0
-        if self.adv_cl: adv_cs_loss = 0 
         batch_image, batch_labels = batch["image"], batch["labels"]
         # Get the encoder mappings.
         if w_real_hat is None:
@@ -612,24 +637,42 @@ class StyleGAN2Model(pl.LightningModule):
                     batch_idx % self.config.buffer_size, :, :
                 ] = w_real_hat.detach()
 
-        start = len(self.cond_dims)
-        # Optimize subspace classifiers.
-        for i in range(len(self.class_dims)):
-            subspace_labels = batch_labels[:, start + i : start + (i + 1)].squeeze(1)
-            subspace = w_real_hat[
-                :, sum(self.subspace_dims[:i]) : sum(self.subspace_dims[: i + 1])
-            ]
+        num_subspaces = len(self.class_dims)
 
-            y_hat = self.Cs[str(i)](subspace)
-            c_loss = torch.nn.functional.cross_entropy(
-                input=y_hat,
-                target=subspace_labels,
-            )
-            if log:
-                self.metric_classifiers[state][str(i)].update(y_hat, subspace_labels)
-            subspace_cs_loss = subspace_cs_loss + c_loss
+        if self.class_dim > 0:
+            subspace_cs_loss = 0
+            start = len(self.cond_dims)
+            # Optimize subspace classifiers.
+            for i in range(num_subspaces):
+                subspace_labels = batch_labels[:, start + i : start + (i + 1)].squeeze(
+                    1
+                )
+                subspace = w_real_hat[
+                    :, sum(self.subspace_dims[:i]) : sum(self.subspace_dims[: i + 1])
+                ]
 
-            if self.adv_cl:
+                y_hat = self.Cs[str(i)](subspace)
+                c_loss = torch.nn.functional.cross_entropy(
+                    input=y_hat,
+                    target=subspace_labels,
+                )
+                if log:
+                    self.metric_classifiers[state][str(i)].update(
+                        y_hat, subspace_labels
+                    )
+                subspace_cs_loss = subspace_cs_loss + c_loss
+
+            subspace_cs_loss = subspace_cs_loss / num_subspaces
+
+        if self.adv_cl:
+            adv_cs_loss = 0
+            for i in range(num_subspaces):
+                subspace_labels = batch_labels[:, start + i : start + (i + 1)].squeeze(
+                    1
+                )
+                subspace = w_real_hat[
+                    :, sum(self.subspace_dims[:i]) : sum(self.subspace_dims[: i + 1])
+                ]
                 # Training progress for lambda schedule.
                 total_steps = self.trainer.estimated_stepping_batches
                 start_steps = self.current_epoch * self.trainer.num_training_batches
@@ -637,7 +680,7 @@ class StyleGAN2Model(pl.LightningModule):
                 alpha = (2.0 / (1.0 + np.exp(-self.gamma * p)) - 1) * self.alpha_scale
 
                 # First subspaces with labels.
-                rest_subspaces = list(range(len(self.class_dims)))
+                rest_subspaces = list(range(num_subspaces))
                 rest_subspaces.pop(i)
                 for j in rest_subspaces:
                     subspace_labels_adv = batch_labels[
@@ -648,41 +691,46 @@ class StyleGAN2Model(pl.LightningModule):
                         input=y_hat_adv,
                         target=subspace_labels_adv,
                     )
+                    if log:
+                        self.metric_adv_classifiers[state][f"{i},{j}"].update(
+                            y_hat_adv,
+                            subspace_labels_adv,
+                        )
                     adv_cs_loss = adv_cs_loss + c_loss_adv
-                
+
                 # Last subspace without labels (style space).
-                last_subspace = w_real_hat[ :, sum(self.subspace_dims) : ]
-                y_hat_adv = self.Adv_Cs[f"{len(self.class_dims)+1},{i}"](
-                    last_subspace, alpha
-                )
+                last_subspace = w_real_hat[:, sum(self.subspace_dims) :]
+                y_hat_adv = self.Adv_Cs[f"{num_subspaces+1},{i}"](last_subspace, alpha)
                 c_loss_adv = torch.nn.functional.cross_entropy(
                     input=y_hat_adv,
                     target=subspace_labels,
                 )
+                if log:
+                    self.metric_adv_classifiers[state][f"{num_subspaces},{i}"].update(
+                        y_hat_adv,
+                        subspace_labels,
+                    )
                 adv_cs_loss = adv_cs_loss + c_loss_adv
-
-        subspace_cs_loss = subspace_cs_loss / len(self.class_dims)
-        if self.adv_cl:
             adv_cs_loss = adv_cs_loss / len(self.Adv_Cs.keys())
 
-        # Minimize dependence measure between subspaces.
+        # Compute distance correlation between subspaces.
         dCor_measures = []
         free_subspace = self.config.latent_dim - sum(self.subspace_dims)
         all_subspace_dims = self.subspace_dims + [
             free_subspace,
         ]
-        for i in range(len(self.class_dims) + 1):
+        for i in range(num_subspaces + 1):
             for j in range(i):
                 start_dim_w1 = sum(all_subspace_dims[:j])
-                end_dim_w1 = sum(all_subspace_dims[:j + 1])
+                end_dim_w1 = sum(all_subspace_dims[: j + 1])
                 start_dim_w2 = sum(all_subspace_dims[:i])
-                end_dim_w2 = sum(all_subspace_dims[:i + 1])
+                end_dim_w2 = sum(all_subspace_dims[: i + 1])
                 if W is not None:
-                    W1 = W[:, start_dim_w1 : end_dim_w1]
-                    W2 = W[:, start_dim_w2 : end_dim_w2]
+                    W1 = W[:, start_dim_w1:end_dim_w1]
+                    W2 = W[:, start_dim_w2:end_dim_w2]
                 else:
-                    W1 = w_real_hat[:, start_dim_w1 : end_dim_w1]
-                    W2 = w_real_hat[:, start_dim_w2 : end_dim_w2]
+                    W1 = w_real_hat[:, start_dim_w1:end_dim_w1]
+                    W2 = w_real_hat[:, start_dim_w2:end_dim_w2]
                 dCor_measure = distance_correlation(W1, W2)
                 dCor_measures.append(dCor_measure)
                 if log:
@@ -731,8 +779,8 @@ class StyleGAN2Model(pl.LightningModule):
         }
         if self.aug:
             metric_dict.update({"aug_p": self.metric_aug_p.compute()})
-        if self.class_dim > 0:
-            self._extend_metric_dict_on_state_epoch_end(metric_dict, state="trn")
+
+        self._extend_metric_dict_on_state_epoch_end(metric_dict, state="trn")
 
         self.log_dict(
             metric_dict,
@@ -755,8 +803,7 @@ class StyleGAN2Model(pl.LightningModule):
         self.metric_overall_loss["trn"].reset()
         if self.aug:
             self.metric_aug_p.reset()
-        if self.class_dim > 0:
-            self._reset_subspace_metrics(state="trn")
+        self._reset_subspace_metrics(state="trn")
 
     def on_validation_epoch_end(self):
         metric_dict = {
@@ -765,8 +812,7 @@ class StyleGAN2Model(pl.LightningModule):
             "val_overall_loss": self.metric_overall_loss["val"].compute(),
             "step": float(self.current_epoch),
         }
-        if self.class_dim > 0:
-            self._extend_metric_dict_on_state_epoch_end(metric_dict, state="val")
+        self._extend_metric_dict_on_state_epoch_end(metric_dict, state="val")
 
         odir_samples = os.path.join(self.experiment_folder, "images/")
         Path(odir_samples).mkdir(exist_ok=True, parents=False)
@@ -786,8 +832,7 @@ class StyleGAN2Model(pl.LightningModule):
         self.metric_E_feature_real["val"].reset()
         self.metric_E_w_fake["val"].reset()
         self.metric_overall_loss["val"].reset()
-        if self.class_dim > 0:
-            self._reset_subspace_metrics(state="val")
+        self._reset_subspace_metrics(state="val")
 
     def on_test_epoch_end(self):
         metric_dict = {
@@ -796,9 +841,7 @@ class StyleGAN2Model(pl.LightningModule):
             "test_overall_loss": self.metric_overall_loss["test"].compute(),
             "step": float(self.current_epoch),
         }
-
-        if self.class_dim > 0:
-            self._extend_metric_dict_on_state_epoch_end(metric_dict, state="test")
+        self._extend_metric_dict_on_state_epoch_end(metric_dict, state="test")
 
         self.log_dict(
             metric_dict,
@@ -812,17 +855,31 @@ class StyleGAN2Model(pl.LightningModule):
         self.metric_E_feature_real["test"].reset()
         self.metric_E_w_fake["test"].reset()
         self.metric_overall_loss["test"].reset()
-        if self.class_dim > 0:
-            self._reset_subspace_metrics(state="test")
+        self._reset_subspace_metrics(state="test")
 
     def _extend_metric_dict_on_state_epoch_end(
         self,
         metric_dict: dict,
         state: str = "trn",
     ):
-        for i in range(len(self.class_dims)):
-            metric_dict.update(self.metric_classifiers[state][str(i)].compute())
-        for i in range(len(self.class_dims) + 1):
+        num_subspaces = len(self.class_dims)
+        if self.class_dim > 0:
+            for i in range(num_subspaces):
+                metric_dict.update(self.metric_classifiers[state][str(i)].compute())
+        if self.adv_cl:
+            for i in range(num_subspaces):
+                rest_subspaces = list(range(num_subspaces))
+                rest_subspaces.pop(i)
+                for j in rest_subspaces:
+                    metric_dict.update(
+                        self.metric_adv_classifiers[state][f"{i},{j}"].compute()
+                    )
+                metric_dict.update(
+                    self.metric_adv_classifiers[state][
+                        f"{num_subspaces},{i}"
+                    ].compute()
+                )
+        for i in range(num_subspaces + 1):
             for j in range(i):
                 metric_dict.update(
                     {
@@ -839,8 +896,17 @@ class StyleGAN2Model(pl.LightningModule):
         )
 
     def _reset_subspace_metrics(self, state: str = "trn"):
-        for i in range(len(self.class_dims)):
-            self.metric_classifiers[state][str(i)].reset()
+        num_subspaces = len(self.class_dims)
+        if self.class_dim > 0:
+            for i in range(num_subspaces):
+                self.metric_classifiers[state][str(i)].reset()
+        if self.adv_cl:
+            for i in range(num_subspaces):
+                rest_subspaces = list(range(num_subspaces))
+                rest_subspaces.pop(i)
+                for j in rest_subspaces:
+                    self.metric_adv_classifiers[state][f"{i},{j}"].reset()
+                self.metric_adv_classifiers[state][f"{num_subspaces},{i}"].reset()
         for i in range(len(self.class_dims) + 1):
             for j in range(i):
                 self.metric_dCor[state][f"{j}{i}"].reset()
