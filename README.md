@@ -7,7 +7,7 @@ disentangles patient attributes from camera effects with a a disentanglement los
 on distance correlation. The resulting models enable controllable and highly realistic
 fundus image generation.
 
-<img src="./figures/intro_figure.png" width="1000"/>
+<img src="./figures/new_intro_figure.png" width="1000"/>
 
 # Installation
 
