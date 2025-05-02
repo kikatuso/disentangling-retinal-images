@@ -2,7 +2,7 @@ output_dir: ./outputs
 experiment_folder: ethn_cam_adv_cl
 
 gpus: [0,1]
-max_epoch: 25
+max_epoch: 100
 
 # Lightning trainer.
 val_check_percent: 1.0  # how much of validation dataset to check 
@@ -22,8 +22,8 @@ data:
   columns_mapping_path: 
   splits_dir: 
 
-  image_size: 64 
-  batch_size: 12  # 14 for gpu nvidia titan xp
+  image_size: 256 
+  batch_size: 22  # 14 for gpu nvidia titan xp
   num_workers: 8 
   prefetch_factor: 2 
 
@@ -48,7 +48,7 @@ lambda_distance_correlation: 0.0  # distance correlation loss
 
 # Model paramters.
 generator: stylegan2  # generator architecture, if not "stylegan2", the generator will be stylegan1
-latent_dim: 32  # input latent (Z) dimensionality and intermediate latent (W) dimensionality
+latent_dim: 36  # input latent (Z) dimensionality and intermediate latent (W) dimensionality
 num_mapping_layers: 8  # number of mapping network layers
 lr_g: 0.0025  # generator learning rate
 lr_d: 0.0025  # discriminator learning rate
