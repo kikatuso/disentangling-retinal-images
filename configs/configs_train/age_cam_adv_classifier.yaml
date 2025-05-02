@@ -22,8 +22,8 @@ data:
   columns_mapping_path: 
   splits_dir: 
 
-  image_size: 64 
-  batch_size: 12  # 14 for gpu nvidia titan xp
+  image_size: 256 
+  batch_size: 22  # 14 for gpu nvidia titan xp
   num_workers: 8 
   prefetch_factor: 2 
 
