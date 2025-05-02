@@ -674,9 +674,12 @@ class StyleGAN2Model(pl.LightningModule):
                     :, sum(self.subspace_dims[:i]) : sum(self.subspace_dims[: i + 1])
                 ]
                 # Training progress for lambda schedule.
-                total_steps = self.trainer.estimated_stepping_batches
-                start_steps = self.current_epoch * self.trainer.num_training_batches
-                p = float(batch_idx + start_steps) / total_steps
+                if state == "test":
+                    p = 1
+                else:
+                    total_steps = self.trainer.estimated_stepping_batches
+                    start_steps = self.current_epoch * self.trainer.num_training_batches
+                    p = float(batch_idx + start_steps) / total_steps
                 alpha = (2.0 / (1.0 + np.exp(-self.gamma * p)) - 1) * self.alpha_scale
 
                 # First subspaces with labels.
