@@ -111,11 +111,15 @@ we extended the gan architecture with gan inversion and independent subspace lea
 # Cite
 If you find our code or paper useful, please consider citing this work.
 ```bibtex
-@misc{mueller2024disentangling,
-    title = {Disentangling representations of retinal images with generative models},
-    author = {M\"uller, Sarah and Koch, Lisa M. and Lensch, Hendrik, P. A. and Berens, Philipp},
-    year = {2024},
-    eprint = {2402.19186},
-    archivePrefix = {arXiv},
+@article{mueller2025disentangling,
+   title = {Disentangling representations of retinal images with generative models},
+   author = {M\"uller, Sarah and Koch, Lisa M. and Lensch, Hendrik, P. A. and Berens, Philipp},
+   journal = {Medical Image Analysis},
+   volume = {105},
+   pages = {103628},
+   year = {2025},
+   issn = {1361-8415},
+   doi = {https://doi.org/10.1016/j.media.2025.103628},
+   url = {https://www.sciencedirect.com/science/article/pii/S1361841525001756},
 }
 ``` 
