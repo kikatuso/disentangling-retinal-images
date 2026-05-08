@@ -4,7 +4,6 @@ import os
 import torch
 from omegaconf import OmegaConf
 
-#from src.dataset.eyepacs import EyePACS
 from src.dataset.ukb_dataset import ImageFeatureDataset
 
 from src.dataset.utils import compute_label_dims
@@ -12,8 +11,6 @@ from src.generative_model.stylegan import StyleGAN2Model
 from src.generative_model.trainer import create_trainer
 from src.utils.utils import get_labels, load_yaml_config, make_exp_folder
 
-
-### activate env: conda activate disen_py39  
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -33,52 +30,24 @@ if __name__ == "__main__":
     experiment_folder = make_exp_folder(config)
     config = OmegaConf.create(config)
     labels = get_labels(config)
-        
+
     shared_kwargs = dict(
         image_dir=config.data.image_dir,
         feature_path=config.data.feature_path,
         index_col=config.data.index_col,
-        splits_dir=config.data.splits_dir,
         target_size=config.data.image_size,
         column_names=config.data.column_names if config.data.column_names != "all" else "all",
         img_extension=config.data.img_extension,
         subfolder_search=config.data.subfolder_search,
         fullpath_in_index=config.data.fullpath_in_index,
+        split_ratios=OmegaConf.to_container(config.data.split_ratios, resolve=True),
+        split_seed=config.data.split_seed,
+        stratify_on=config.data.stratify_on if config.data.stratify_on else None,
+        n_quantiles=config.data.n_quantiles,
     )
 
     train_set = ImageFeatureDataset(**shared_kwargs, split="train")
     val_set   = ImageFeatureDataset(**shared_kwargs, split="val")
-
-
-    # train_set = EyePACS(
-    #     image_root_dir=config.data.image_root_dir,
-    #     meta_factorized_path=config.data.meta_factorized_path,
-    #     columns_mapping_path=config.data.columns_mapping_path,
-    #     splits_dir=config.data.splits_dir,
-    #     split="train",
-    #     image_size=config.data.image_size,
-    #     input_preprocessing=config.data.input_preprocessing,
-    #     labels=labels,
-    #     onehot_enc=False,
-    #     subset=config.data.train_subset,
-    #     filter_meta=config.data.filter_meta,
-    #     ram=config.data.ram,
-    # )
-
-    # val_set = EyePACS(
-    #     image_root_dir=config.data.image_root_dir,
-    #     meta_factorized_path=config.data.meta_factorized_path,
-    #     columns_mapping_path=config.data.columns_mapping_path,
-    #     splits_dir=config.data.splits_dir,
-    #     split="val",
-    #     image_size=config.data.image_size,
-    #     input_preprocessing=config.data.input_preprocessing,
-    #     labels=labels,
-    #     onehot_enc=False,
-    #     subset=config.data.val_subset,
-    #     filter_meta=config.data.filter_meta,
-    #     ram=config.data.ram,
-    # )
 
     train_dataloader = torch.utils.data.DataLoader(
         train_set,
@@ -98,11 +67,12 @@ if __name__ == "__main__":
         prefetch_factor=config.data.prefetch_factor,
         drop_last=True,
     )
+
     lambda_gp = (
         0.0002
         * (config.data.image_size**2)
         / (config.data.batch_size * len(config.gpus))
-    )  # heuristic formula from original implementation
+    )
 
     cond_dims = compute_label_dims(train_set, config.data.conditional_labels)
     class_dims = compute_label_dims(train_set, config.data.classifier_labels)

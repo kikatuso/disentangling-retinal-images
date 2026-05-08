@@ -7,40 +7,104 @@ import pandas as pd
 import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
+from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 from torch.utils.data import Dataset
 
 
+def build_pca_stratify_labels(
+    features: pd.DataFrame,
+    columns: Optional[Union[str, List[str]]] = None,
+    n_components: int = 3,
+    n_quantiles: int = 4,
+    seed: int = 42,
+) -> Optional[np.ndarray]:
+    if columns is None:
+        df = features
+    elif isinstance(columns, str):
+        df = features[[columns]]
+    else:
+        df = features[columns]
+
+    if df.shape[0] < 2 or df.shape[1] == 0:
+        return None
+
+    X = df.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    X = np.where(X == -1, np.nan, X)
+
+    for j in range(X.shape[1]):
+        col = X[:, j]
+        median = np.nanmedian(col) if np.any(~np.isnan(col)) else 0.0
+        col[np.isnan(col)] = median
+        X[:, j] = col
+
+    X = StandardScaler().fit_transform(X)
+
+    n_comp = min(n_components, X.shape[1], X.shape[0] - 1)
+    if n_comp < 1:
+        return None
+
+    pcs = PCA(n_components=n_comp, random_state=seed).fit_transform(X)
+
+    bin_columns = []
+    for j in range(n_comp):
+        raw = pcs[:, j]
+        edges = np.unique(np.percentile(raw, np.linspace(0, 100, n_quantiles + 1)))
+        if len(edges) <= 2:
+            bins = np.zeros(len(raw), dtype=np.int64)
+        else:
+            bins = np.digitize(raw, edges[1:-1])
+        bin_columns.append(bins)
+
+    combined = np.zeros(len(df), dtype=np.int64)
+    for power, bins in enumerate(bin_columns):
+        combined += bins * (n_quantiles ** power)
+
+    _, labels = np.unique(combined, return_inverse=True)
+
+    if np.min(np.bincount(labels)) < 2:
+        return None
+
+    return labels
+
+
+def _safe_split_indices(
+    indices: np.ndarray,
+    labels: Optional[np.ndarray],
+    split_ratios: dict,
+    seed: int,
+):
+    val_rel_size = split_ratios["val"] / (split_ratios["val"] + split_ratios["test"])
+
+    train_labels = labels
+    if train_labels is not None and np.min(np.bincount(train_labels)) < 2:
+        train_labels = None
+
+    train_idx, valtest_idx = train_test_split(
+        indices,
+        test_size=(split_ratios["val"] + split_ratios["test"]),
+        random_state=seed,
+        stratify=train_labels,
+    )
+
+    valtest_labels = None
+    if labels is not None:
+        valtest_labels = labels[valtest_idx]
+        if np.min(np.bincount(valtest_labels)) < 2:
+            valtest_labels = None
+
+    val_idx, test_idx = train_test_split(
+        valtest_idx,
+        test_size=(1.0 - val_rel_size),
+        random_state=seed,
+        stratify=valtest_labels,
+    )
+
+    return train_idx, val_idx, test_idx
+
+
 class ImageFeatureDataset(Dataset):
-    """Dataset for images paired with continuous metadata features.
-
-    A drop-in replacement for EyePACS. Returns a dict with 'image' and 'labels'
-    keys, where 'labels' is a normalized continuous feature vector.
-
-    Splits are performed internally using a seeded stratified split on quantile-
-    binned labels, so no external split files are needed.
-
-    Attributes:
-        image_dir: Root directory containing images.
-        feature_path: Path to CSV file with continuous metadata features.
-        index_col: Column in the CSV to use as the index (matched against image stems).
-        split: One of {'train', 'val', 'test'}.
-        split_ratios: Dict with keys 'train', 'val', 'test' that sum to 1.0.
-            E.g. {'train': 0.7, 'val': 0.15, 'test': 0.15}
-        split_seed: Random seed for reproducible splits.
-        stratify_on: Column name to stratify splits on. The column will be binned
-            into quantiles for stratification. If None, no stratification is used.
-        n_quantiles: Number of quantile bins for stratification.
-        img_extension: Image file extension to glob for.
-        subfolder_search: If True, search recursively through subdirectories.
-        fullpath_in_index: If True, match full image paths against CSV index
-            instead of stems.
-        target_size: If set, images are resized with aspect-ratio-preserving
-            padding to this square size.
-        transform: Optional transform applied to the image tensor after loading.
-        column_names: List of feature column names to use, or 'all' for every column.
-    """
-
     def __init__(
         self,
         image_dir: str,
@@ -49,7 +113,7 @@ class ImageFeatureDataset(Dataset):
         split: str = "train",
         split_ratios: Optional[dict] = None,
         split_seed: int = 42,
-        stratify_on: Optional[str] = None,
+        stratify_on: Optional[Union[str, List[str]]] = None,
         n_quantiles: int = 4,
         img_extension: str = ".png",
         subfolder_search: bool = False,
@@ -62,15 +126,19 @@ class ImageFeatureDataset(Dataset):
         self.target_size = target_size
         self.transform = transform
 
-        assert split in ("train", "val", "test"), \
+        assert split in ("train", "val", "test"), (
             f"split must be one of 'train', 'val', 'test', got '{split}'"
+        )
 
         if split_ratios is None:
             split_ratios = {"train": 0.7, "val": 0.15, "test": 0.15}
-        assert abs(sum(split_ratios.values()) - 1.0) < 1e-6, \
+        assert abs(sum(split_ratios.values()) - 1.0) < 1e-6, (
             "split_ratios must sum to 1.0"
+        )
 
-        # --- Gather image paths ---
+        if isinstance(stratify_on, str):
+            stratify_on = [stratify_on]
+
         if subfolder_search:
             all_image_paths = sorted(
                 glob.glob(f"{image_dir}/**/*{img_extension}", recursive=True)
@@ -78,19 +146,20 @@ class ImageFeatureDataset(Dataset):
         else:
             all_image_paths = sorted(glob.glob(f"{image_dir}/*{img_extension}"))
 
-        # --- Load and validate features ---
         features = pd.read_csv(feature_path, index_col=index_col)
-        if column_names != "all":
-            assert set(column_names).issubset(set(features.columns)), \
-                "Some specified column names are not in the features CSV."
-            # Keep stratify column even if not in column_names
-            cols_to_load = list(column_names)
-            if stratify_on is not None and stratify_on not in cols_to_load:
-                cols_to_load.append(stratify_on)
-            features = features[cols_to_load]
         features = features[~features.index.duplicated(keep="last")]
 
-        # --- Align images and features ---
+        if column_names != "all":
+            assert set(column_names).issubset(set(features.columns)), (
+                "Some specified column names are not in the features CSV."
+            )
+            cols_to_load = list(column_names)
+            if stratify_on is not None:
+                for col in stratify_on:
+                    if col not in cols_to_load:
+                        cols_to_load.append(col)
+            features = features[cols_to_load]
+
         if fullpath_in_index:
             common = sorted(set(all_image_paths) & set(features.index))
             features = features.loc[common]
@@ -100,33 +169,23 @@ class ImageFeatureDataset(Dataset):
             all_image_paths = [image_map[k] for k in common]
             features = features.loc[common]
 
-        # --- Stratified seeded split ---
         indices = np.arange(len(common))
+
         stratify_labels = None
         if stratify_on is not None:
-            col = features[stratify_on].to_numpy(dtype=float)
-            # Replace NaN/-1 with median before binning
-            col = np.where((np.isnan(col)) | (col == -1), np.nanmedian(col), col)
-            quantile_edges = np.nanpercentile(
-                col, np.linspace(0, 100, n_quantiles + 1)
+            stratify_labels = build_pca_stratify_labels(
+                features=features,
+                columns=stratify_on,
+                n_components=3,
+                n_quantiles=n_quantiles,
+                seed=split_seed,
             )
-            # Deduplicate edges (can happen with skewed distributions)
-            quantile_edges = np.unique(quantile_edges)
-            stratify_labels = np.digitize(col, quantile_edges[1:-1])
 
-        val_rel_size = split_ratios["val"] / (split_ratios["val"] + split_ratios["test"])
-
-        train_idx, valtest_idx = train_test_split(
-            indices,
-            test_size=(split_ratios["val"] + split_ratios["test"]),
-            random_state=split_seed,
-            stratify=stratify_labels,
-        )
-        val_idx, test_idx = train_test_split(
-            valtest_idx,
-            test_size=(1.0 - val_rel_size),
-            random_state=split_seed,
-            stratify=stratify_labels[valtest_idx] if stratify_labels is not None else None,
+        train_idx, val_idx, test_idx = _safe_split_indices(
+            indices=indices,
+            labels=stratify_labels,
+            split_ratios=split_ratios,
+            seed=split_seed,
         )
 
         split_indices = {"train": train_idx, "val": val_idx, "test": test_idx}
@@ -136,35 +195,35 @@ class ImageFeatureDataset(Dataset):
             self.image_paths = [common[i] for i in chosen]
         else:
             self.image_paths = [all_image_paths[i] for i in chosen]
+
         features = features.iloc[chosen]
 
-        # Drop stratify column if it wasn't in the original column_names request
-        if (
-            stratify_on is not None
-            and column_names != "all"
-            and stratify_on not in column_names
-        ):
-            features = features.drop(columns=[stratify_on])
+        if stratify_on is not None and column_names != "all":
+            extra = [c for c in stratify_on if c not in column_names]
+            if extra:
+                features = features.drop(columns=extra)
 
         print(
             f"[{split}] {len(self.image_paths)} samples "
             f"(train={len(train_idx)}, val={len(val_idx)}, test={len(test_idx)})"
         )
 
-        # --- Normalize features ---
         features = features.replace(-1, np.nan)
         features = np.log1p(features).clip(lower=0)
-        self.feature_median = features.median()
-        self.feature_iqr = features.quantile(0.75) - features.quantile(0.25)
-        features = features.fillna(self.feature_median)
-        features = (features - self.feature_median) / self.feature_iqr.replace(0, 1)
+
+        feature_median = features.median()
+        feature_iqr = features.quantile(0.75) - features.quantile(0.25)
+
+        features = features.fillna(feature_median)
+        features = (features - feature_median) / feature_iqr.replace(0, 1)
 
         self.features = torch.tensor(features.values, dtype=torch.float32)
         self.feature_names = features.columns.tolist()
         self.feature_median = torch.tensor(
-            self.feature_median.values, dtype=torch.float32
+            feature_median.values, dtype=torch.float32
         )
-        self.feature_iqr = torch.tensor(self.feature_iqr.values, dtype=torch.float32)
+        self.feature_iqr = torch.tensor(feature_iqr.values, dtype=torch.float32)
+        self._num_classes = {name: 1 for name in self.feature_names}
 
     @property
     def label_dim(self) -> int:
@@ -175,9 +234,7 @@ class ImageFeatureDataset(Dataset):
 
     def _open_image(self, path: str) -> torch.Tensor:
         img = Image.open(path).convert("RGB")
-        return (
-            torch.from_numpy(np.array(img, dtype=np.float32)).permute(2, 0, 1) / 255.0
-        )
+        return torch.from_numpy(np.array(img, dtype=np.float32)).permute(2, 0, 1) / 255.0
 
     def _resize_with_padding(self, img: torch.Tensor) -> torch.Tensor:
         _, h, w = img.shape
@@ -187,8 +244,7 @@ class ImageFeatureDataset(Dataset):
         pad_h = self.target_size - new_h
         pad_w = self.target_size - new_w
         top, left = pad_h // 2, pad_w // 2
-        img = TF.pad(img, [left, top, pad_w - left, pad_h - top])
-        return img
+        return TF.pad(img, [left, top, pad_w - left, pad_h - top])
 
     def __getitem__(self, idx: int) -> dict:
         image = self._open_image(self.image_paths[idx])
