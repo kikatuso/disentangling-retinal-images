@@ -23,7 +23,7 @@ data:
   img_extension: .png
   subfolder_search: true
   fullpath_in_index: true
-  batch_size: 32
+  batch_size: 16
   num_workers: 6
   prefetch_factor: 2
 
@@ -35,8 +35,7 @@ data:
   stratify_on: ['vessel_density','fractal_dimension','average_width','squared_curvature_tortuosity']
   n_quantiles: 4
 
-  # No conditional GAN labels
-  conditional_labels:
+  conditional_labels: [] #['vessel_density','fractal_dimension','average_width','squared_curvature_tortuosity']
   # One regression target per feature — each gets its own subspace
   classifier_labels: ['vessel_density','fractal_dimension','average_width','squared_curvature_tortuosity']
 

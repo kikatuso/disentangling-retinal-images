@@ -310,6 +310,9 @@ class SeparateMappingNetwork(torch.nn.Module):
         subspace_cumsums = (
             [0] + list(np.cumsum(self.subspace_dims)) + [self.w_dim]
         )  # [0, 4, 16, 32]
+
+        # subspace_cumsums = [0] + list(np.cumsum(self.subspace_dims)) + [self.z_dim]
+
         ws = torch.cat(
             [
                 w_mapping(

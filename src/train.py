@@ -2,6 +2,7 @@ import argparse
 import os
 
 import torch
+torch.set_float32_matmul_precision('medium')
 from omegaconf import OmegaConf
 
 from src.dataset.ukb_dataset import ImageFeatureDataset
@@ -77,13 +78,32 @@ if __name__ == "__main__":
     cond_dims = compute_label_dims(train_set, config.data.conditional_labels)
     class_dims = compute_label_dims(train_set, config.data.classifier_labels)
 
+    print("\nClassifier label dimensions:")
+    for label, dim in zip(config.data.classifier_labels, class_dims):
+        task = "regression" if dim == 1 else "classification"
+        print(f"  {label}: dim={dim} -> {task}")
+
+
+    cond_distributions = []
     if len(cond_dims) > 0:
-        _, counts = torch.unique(train_set._meta[:, 0], return_counts=True)
-        cond_distribution = torch.distributions.categorical.Categorical(
-            probs=counts / counts.sum()
-        )
+        if all(dim > 1 for dim in cond_dims):
+            for i, dim in enumerate(cond_dims):
+                _, counts = torch.unique(train_set.features[:, i], return_counts=True)
+                cond_distributions.append(
+                    torch.distributions.Categorical(probs=counts.float() / counts.sum())
+                )
+
+        elif all(dim == 1 for dim in cond_dims):
+            for i, dim in enumerate(cond_dims):
+                values = train_set.features[:, i].float()
+                mean = values.mean()
+                std = values.std().clamp_min(1e-6)
+                cond_distributions.append(torch.distributions.Normal(mean, std))
+        else:
+            cond_distributions = None
     else:
-        cond_distribution = None
+        cond_distributions = None
+
 
     trainer, checkpoint_callback = create_trainer(config, experiment_folder)
     model = StyleGAN2Model(
@@ -92,7 +112,7 @@ if __name__ == "__main__":
         lambda_gp,
         cond_dims,
         class_dims,
-        cond_distribution,
+        cond_distributions,
     )
 
     trainer.fit(

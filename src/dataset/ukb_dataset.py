@@ -169,6 +169,7 @@ class ImageFeatureDataset(Dataset):
             all_image_paths = [image_map[k] for k in common]
             features = features.loc[common]
 
+
         indices = np.arange(len(common))
 
         stratify_labels = None

@@ -38,7 +38,7 @@ class StyleGAN2Model(pl.LightningModule):
         cond_dims: Labels for conditional GAN training.
         class_dims: Dimension of subspace classification/regression problems.
             A value of 1 means a regression target; >1 means classification.
-        cond_distribution: Distribution of conditional labels.
+        cond_distributions: List of distributions of conditional labels.
     """
 
     def __init__(
@@ -48,7 +48,7 @@ class StyleGAN2Model(pl.LightningModule):
         lambda_gp: float,
         cond_dims: Optional[List[int]] = [],
         class_dims: Optional[List[int]] = [],
-        cond_distribution=None,
+        cond_distributions=None,
     ):
         super().__init__()
         self.save_hyperparameters(config)
@@ -61,7 +61,7 @@ class StyleGAN2Model(pl.LightningModule):
         self.class_dims = class_dims
         self.class_dim = sum(self.class_dims)
 
-        self.cond_distribution = cond_distribution
+        self.cond_distributions = cond_distributions
 
         # Determine per-subspace task: regression (dim==1) or classification (dim>1)
         if self.class_dim > 0:
@@ -261,13 +261,20 @@ class StyleGAN2Model(pl.LightningModule):
             return self.G.w_mapping(z1), wz1, style_mixing
 
     def get_cond_labels(self, shape=None):
-        if self.cond_dim > 0:
-            n = shape if shape is not None else self.config.data.batch_size
-            batch_cond_labels_fake = self.cond_distribution.sample((n,))
-            batch_cond_labels_fake = self.onehot_labels(batch_cond_labels_fake, self.cond_dim)
-        else:
-            batch_cond_labels_fake = None
-        return batch_cond_labels_fake
+        if self.cond_dim == 0:
+            return None
+
+        n = shape if shape is not None else self.config.data.batch_size
+        parts = []
+
+        for dist, dim in zip(self.cond_distributions, self.cond_dims):
+            if dim == 1:
+                parts.append(dist.sample((n,)).float().unsqueeze(1))
+            else:
+                y = dist.sample((n,))
+                parts.append(self.onehot_labels(y, dim))
+
+        return torch.cat(parts, dim=1).to(self.device)
 
     def onehot_labels(self, labels, num_classes):
         return torch.eye(num_classes)[[labels]].to(self.device)
@@ -295,12 +302,22 @@ class StyleGAN2Model(pl.LightningModule):
     # calls to _shared_subspaces_eval_step which is updated below)
     # ------------------------------------------------------------------
 
+    def format_cond_labels(self, labels):
+        parts = []
+        for i, dim in enumerate(self.cond_dims):
+            col = labels[:, i]
+            if dim == 1:
+                parts.append(col.float().unsqueeze(1))
+            else:
+                parts.append(self.onehot_labels(col, dim))
+        return torch.cat(parts, dim=1).to(self.device)
+
+
     def training_step(self, batch, batch_idx):
         overall_loss = 0.0
         batch_image_real = batch["image"]
-        if self.cond_dim > 0:
-            batch_cond_labels_real = batch["labels"][:, : len(self.cond_dims)].squeeze(1)
-            batch_cond_labels_real = self.onehot_labels(batch_cond_labels_real, self.cond_dim)
+        if self.cond_dim > 0:    
+            batch_cond_labels_real = self.format_cond_labels(batch["labels"][:, :len(self.cond_dims)])
         else:
             batch_cond_labels_real = None
 
@@ -481,8 +498,8 @@ class StyleGAN2Model(pl.LightningModule):
 
     def _shared_encoder_eval_step(self, batch, batch_idx, state: str = "val"):
         if self.cond_dim > 0:
-            batch_labels_real = batch["labels"][:, : len(self.cond_dims)].squeeze(1)
-            batch_labels_real = self.onehot_labels(batch_labels_real, self.cond_dim)
+            batch_labels_real = self.format_cond_labels(batch["labels"][:, : len(self.cond_dims)])
+
             w_fake, wz_fake, _, batch_labels_fake = self.get_latent()
         else:
             batch_labels_real = None
@@ -765,8 +782,7 @@ class StyleGAN2Model(pl.LightningModule):
                 _, w_real_hat, _ = self.D(batch_image_real.to(self.device), None)
                 labels = None
                 if self.cond_dim > 0:
-                    labels = batch["labels"][:, : len(self.cond_dims)].squeeze(1)
-                    labels = self.onehot_labels(labels, self.cond_dim)
+                    labels = self.format_cond_labels(batch["labels"][:, : len(self.cond_dims)])
                 recons = self.G.wz_to_image(wz=w_real_hat, c=labels)
                 if self.current_epoch == (self.config.val_check_interval - 1):
                     vis_reals.append(batch_image_real)

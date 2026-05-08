@@ -7,28 +7,19 @@ import numpy as np
 import yaml
 
 
-def get_labels(config: dict) -> List[np.array]:
-    """Combine conditional and subspace labels.
-
-    Args:
-        config: Training config file.
-
-    Returns:
-        Combined labels.
-    """
+def get_labels(config: dict):
     labels = []
 
     cond_labels = config.data.conditional_labels
     c_labels = config.data.classifier_labels
 
-    if cond_labels is not None:
-        labels.append(cond_labels)
-    if c_labels is not None:
-        labels.append(c_labels)
-    else:
-        return None
-    return list(np.array(labels).flatten())
+    if cond_labels:
+        labels.extend(cond_labels)
 
+    if c_labels:
+        labels.extend(c_labels)
+
+    return labels
 
 def load_yaml_config(config_filename: str) -> dict:
     """Load yaml config.
