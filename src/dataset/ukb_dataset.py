@@ -240,7 +240,7 @@ class ImageFeatureDataset(Dataset):
         _, h, w = img.shape
         scale = self.target_size / max(h, w)
         new_h, new_w = int(h * scale), int(w * scale)
-        img = TF.resize(img, [new_h, new_w])
+        img = TF.resize(img, [new_h, new_w],antialias=True)
         pad_h = self.target_size - new_h
         pad_w = self.target_size - new_w
         top, left = pad_h // 2, pad_w // 2

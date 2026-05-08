@@ -19,26 +19,26 @@ data:
   feature_path: '/gpfs3/well/papiez/users/zwk579/.temp_data/256x256px/recomputed_28_04_2026.csv'
   index_col: 'path'
   image_size: 256
-  column_names: ['vessel_density','fractal_dimension','average_width','distance_tortuosity','squared_curvature_tortuosity','tortuosity_density']
+  column_names: ['vessel_density','fractal_dimension','average_width','squared_curvature_tortuosity']
   img_extension: .png
   subfolder_search: true
   fullpath_in_index: true
-  batch_size: 14
-  num_workers: 8
+  batch_size: 32
+  num_workers: 6
   prefetch_factor: 2
 
   split_ratios:
-    train: 0.70
-    val: 0.15
-    test: 0.15
+    train: 0.80
+    val: 0.1
+    test: 0.1
   split_seed: 42
-  stratify_on: ['vessel_density','fractal_dimension','average_width','distance_tortuosity','squared_curvature_tortuosity','tortuosity_density']
+  stratify_on: ['vessel_density','fractal_dimension','average_width','squared_curvature_tortuosity']
   n_quantiles: 4
 
   # No conditional GAN labels
   conditional_labels:
   # One regression target per feature — each gets its own subspace
-  classifier_labels: ['vessel_density','fractal_dimension','average_width','distance_tortuosity','squared_curvature_tortuosity','tortuosity_density']
+  classifier_labels: ['vessel_density','fractal_dimension','average_width','squared_curvature_tortuosity']
 
 # Loss weighting terms.
 lambda_plp: 2
@@ -66,7 +66,7 @@ buffer_size: 4
 # Remaining dims (32 - sum) become the free/unstructured subspace
 classifier:
   linear: True
-  subspace_dims: [4, 4, 4, 4, 4, 4]  # 6 subspaces x 4 dims = 24, leaving 8 free
+  subspace_dims: [4, 4, 4, 4]  # 4 subspaces x 4 dims = 16, leaving 16 free
   hidden_layers:
 
 # Disable augmentation
