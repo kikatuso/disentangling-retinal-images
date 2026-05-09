@@ -253,6 +253,7 @@ class ImageFeatureDataset(Dataset):
             image = self._resize_with_padding(image)
         if self.transform is not None:
             image = self.transform(image)
+        image = image * 2 - 1  # [0,1] -> [-1,1] to match GAN expectation
         return {
             "image": image,
             "labels": self.features[idx],

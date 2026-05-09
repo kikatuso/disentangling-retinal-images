@@ -566,7 +566,7 @@ class StyleGAN2Model(pl.LightningModule):
                 )
                 self.W_val[batch_idx % self.config.buffer_size, :, :] = w_real_hat.detach()
 
-        start = len(self.cond_dims)
+        start = 0
 
         for i in range(len(self.class_dims)):
             # Extract the i-th subspace from the encoder output

@@ -2,7 +2,6 @@ import argparse
 import os
 
 import torch
-torch.set_float32_matmul_precision('medium')
 from omegaconf import OmegaConf
 
 from src.dataset.ukb_dataset import ImageFeatureDataset
