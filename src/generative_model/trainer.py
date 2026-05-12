@@ -1,6 +1,8 @@
 import os
+import torch
 from pathlib import Path
 from random import randint
+
 
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -33,11 +35,16 @@ def create_trainer(config: dict, experiment_folder: str):
     )
     print(f"batch_size = {config.data.batch_size}")
 
+    if config.gpus == -1:
+        num_gpus = torch.cuda.device_count()
+    else:
+        num_gpus = len(config.gpus)
+
     trainer = Trainer(
         devices=config.gpus,
         accelerator="gpu",
         strategy=(
-            DDPStrategy(find_unused_parameters=True) if len(config.gpus) > 1 else "auto"
+            DDPStrategy(find_unused_parameters=True) if num_gpus > 1 else "auto"
         ),
         num_sanity_val_steps=config.sanity_steps,
         max_epochs=config.max_epoch,

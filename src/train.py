@@ -68,10 +68,15 @@ if __name__ == "__main__":
         drop_last=True,
     )
 
+    if config.gpus == -1:
+        num_gpus = torch.cuda.device_count()
+    else:
+        num_gpus = len(config.gpus)
+
     lambda_gp = (
         0.0002
         * (config.data.image_size**2)
-        / (config.data.batch_size * len(config.gpus))
+        / (config.data.batch_size * num_gpus)
     )
 
     cond_dims = compute_label_dims(train_set, config.data.conditional_labels)
