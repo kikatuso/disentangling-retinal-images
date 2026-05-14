@@ -21,6 +21,14 @@ def parse_args():
         help="name of yaml config file",
         default="configs/configs_train/test.yaml",
     )
+
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint",
+    )
+
     return parser.parse_args()
 
 
@@ -28,6 +36,7 @@ if __name__ == "__main__":
     args = parse_args()
     config = load_yaml_config(config_filename=args.train_config)
     experiment_folder = make_exp_folder(config)
+
     config = OmegaConf.create(config)
     labels = get_labels(config)
 
@@ -123,7 +132,7 @@ if __name__ == "__main__":
         model,
         train_dataloaders=train_dataloader,
         val_dataloaders=val_dataloader,
-        ckpt_path=config.resume,
+        ckpt_path=args.resume,
     )
 
     with open(os.path.join(experiment_folder, "best_ckpt.txt"), "w") as text_file:

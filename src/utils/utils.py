@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import List
-
+import glob
 import numpy as np
 import yaml
 
@@ -33,6 +33,21 @@ def load_yaml_config(config_filename: str) -> dict:
     with open(config_filename) as f:
         cfg = yaml.load(f, Loader=yaml.FullLoader)
     return cfg
+
+
+def find_latest_checkpoint(checkpoint_folder: str) -> str:
+    checkpoints = os.path.join(
+        checkpoint_folder,
+        "checkpoints",
+        "_epoch=*.ckpt",
+    )
+
+    checkpoint_files = glob.glob(checkpoints)
+
+    if not checkpoint_files:
+        return None
+
+    return max(checkpoint_files, key=os.path.getmtime)
 
 
 def make_exp_folder(config):

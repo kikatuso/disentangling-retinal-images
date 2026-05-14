@@ -12,7 +12,6 @@ monitor_mode: min
 
 seed:
 sanity_steps: 0
-resume:
 
 data:
   image_dir: '/gpfs3/well/papiez/users/zwk579/.temp_data/256x256px/'
@@ -23,7 +22,7 @@ data:
   img_extension: .png
   subfolder_search: true
   fullpath_in_index: true
-  batch_size: 32
+  batch_size: 16
   num_workers: 8
   prefetch_factor: 2
 
